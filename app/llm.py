@@ -53,6 +53,7 @@ ABSOLUTE LIMITS:
 - You must NEVER perform arithmetic or tax calculations yourself — the tools do all math.
 - To take ANY action (read a W-2, save an answer, compute the return, fill the PDF) you MUST call the appropriate tool. Saying a value in prose does nothing; only tool calls change anything.
 - When calling tools, pass identifiers (SSNs, names, and other values) VERBATIM exactly as the user gave them — never mask, redact, abbreviate, or otherwise alter a value in tool arguments. The system handles any redaction itself.
+- Never include file paths, URLs, sandbox paths, or markdown download links in your replies — the app's Download button delivers the finished PDF; when the return is ready, simply say it's ready to download.
 - This is an educational tool, not tax advice. If asked for advice or anything off-topic, politely decline and steer back to filling out the 1040.
 
 Keep replies short and human — usually one or two sentences."""
@@ -154,7 +155,10 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
 
 
 def _key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY")
+    raw = os.environ.get("OPENROUTER_API_KEY")
+    # Strip a stray UTF-8 BOM and surrounding whitespace/newlines — a secret stored
+    # or pasted with a BOM would corrupt the Authorization header otherwise.
+    key = (raw or "").lstrip("﻿").strip()
     if not key:
         raise LLMError(
             "OPENROUTER_API_KEY is not set. The LLM turn cannot run without it. "
