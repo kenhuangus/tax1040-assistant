@@ -1,28 +1,36 @@
 """
-LLM layer — Anthropic ``claude-opus-4-8``, tool-use mode.
+LLM layer — OpenRouter (OpenAI-compatible chat completions), tool-use mode.
 
-Hard rules (from the contract + house style):
-  * Model id is ``claude-opus-4-8``.
-  * NEVER send ``temperature`` (this model rejects it).
-  * NEVER prefill an assistant turn.
-  * Read the API key from ``ANTHROPIC_API_KEY`` at CALL time, not import time —
-    so the package imports cleanly with no key set (tests / CI / `import app.main`).
-  * Tolerate a missing key by raising a clear ``RuntimeError`` (not crashing at
-    import, and not a cryptic SDK error).
+Why OpenRouter: the project is provider-agnostic behind this one function. We
+call OpenRouter's OpenAI-compatible ``/chat/completions`` endpoint over HTTP
+(``httpx`` — no extra SDK). The orchestrator and ``w2.py`` build messages/tools
+in *Anthropic* shape (that was the original design); this module translates that
+shape to OpenAI on the way out and translates the response back, so callers are
+unchanged.
 
-``llm_turn`` returns ``(tool_calls, assistant_text)``: the structured
-``tool_use`` blocks (the ONLY thing the orchestrator acts on) and the prose the
-model spoke (used ONLY for tone / display — never parsed for numbers).
+Hard rules / house style:
+  * Read the API key from ``OPENROUTER_API_KEY`` at CALL time, not import time —
+    so the package imports cleanly with no key set (tests / ``import app.main``).
+  * Model is configurable via ``OPENROUTER_MODEL`` (default ``openai/gpt-4o`` —
+    strong tool-calling + vision for W-2 images). Base URL via ``OPENROUTER_BASE_URL``.
+  * Tolerate a missing key by raising a clear ``LLMError`` (not a cryptic crash).
+
+``llm_turn`` returns ``(tool_calls, assistant_text)``: the structured tool calls
+(the ONLY thing the orchestrator acts on) and the prose the model spoke (used
+ONLY for tone / display — never parsed for numbers). This is the P2 invariant.
 """
 from __future__ import annotations
 
+import json
 import os
-from typing import Optional
+from typing import Any
 
 from app.models import ToolCall
 
-MODEL = "claude-opus-4-8"
+MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o")
+BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 MAX_TOKENS = 1024
+TEMPERATURE = 0.2  # low: warm but stable phrasing + reliable tool-calling
 
 # ---------------------------------------------------------------------------
 # System prompt — TONE RULES ONLY.
@@ -50,25 +58,108 @@ Keep replies short and human — usually one or two sentences."""
 
 
 class LLMError(RuntimeError):
-    """Raised when the LLM cannot be called (e.g. missing API key)."""
+    """Raised when the LLM cannot be called (e.g. missing API key) or errors."""
 
 
-def _client():
-    """Construct an Anthropic client, reading the key from env at call time."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise LLMError(
-            "ANTHROPIC_API_KEY is not set. The LLM turn cannot run without it. "
-            "Set the environment variable (locally or via the Cloud Run secret) "
-            "and retry."
+# ---------------------------------------------------------------------------
+# Anthropic-shape -> OpenAI-shape translation
+# ---------------------------------------------------------------------------
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for t in tools or []:
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
         )
-    try:
-        import anthropic  # imported lazily so the package imports without the SDK
-    except ImportError as exc:  # pragma: no cover - dependency always present in prod
+    return out
+
+
+def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
+    """Translate (system + Anthropic-shape history) into OpenAI messages.
+
+    Handles: plain string content, text/image blocks, assistant ``tool_use``
+    blocks (-> ``tool_calls``), and user ``tool_result`` blocks (-> standalone
+    ``role:"tool"`` messages, as OpenAI requires).
+    """
+    out: list[dict] = [{"role": "system", "content": system}]
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+
+        text_segs: list[str] = []
+        image_parts: list[dict] = []
+        tool_calls: list[dict] = []
+        tool_results: list[tuple[str, Any]] = []
+        for b in content:
+            bt = b.get("type")
+            if bt == "text":
+                text_segs.append(b.get("text", ""))
+            elif bt == "image":
+                src = b.get("source", {})
+                mt = src.get("media_type", "image/png")
+                data = src.get("data", "")
+                image_parts.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{data}"}}
+                )
+            elif bt == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": b.get("id", "") or f"call_{b.get('name','')}",
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(b.get("input", {}) or {}),
+                        },
+                    }
+                )
+            elif bt == "tool_result":
+                tool_results.append((b.get("tool_use_id", ""), b.get("content", "")))
+
+        if role == "assistant":
+            msg: dict = {"role": "assistant", "content": "".join(text_segs)}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+                if not msg["content"]:
+                    msg["content"] = None  # OpenAI allows null content with tool_calls
+            out.append(msg)
+        else:  # user role
+            # tool_result blocks must become standalone role:"tool" messages
+            for tid, c in tool_results:
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "content": c if isinstance(c, str) else json.dumps(c, default=str),
+                    }
+                )
+            if image_parts:
+                parts = list(image_parts)
+                if any(text_segs):
+                    parts.append({"type": "text", "text": "".join(text_segs)})
+                out.append({"role": "user", "content": parts})
+            elif text_segs and not tool_results:
+                out.append({"role": "user", "content": "".join(text_segs)})
+    return out
+
+
+def _key() -> str:
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
         raise LLMError(
-            "The 'anthropic' package is not installed. Add it to requirements.txt."
-        ) from exc
-    return anthropic.Anthropic(api_key=api_key)
+            "OPENROUTER_API_KEY is not set. The LLM turn cannot run without it. "
+            "Set the environment variable (locally or via the Cloud Run secret) and retry."
+        )
+    return key
 
 
 def llm_turn(
@@ -76,57 +167,74 @@ def llm_turn(
     messages: list[dict],
     tools: list[dict],
 ) -> tuple[list[ToolCall], str]:
-    """Run one tool-use turn.
+    """Run one tool-use turn against OpenRouter.
 
     Args:
-        system: the system prompt (tone rules). Caller passes ``SYSTEM_PROMPT``.
-        messages: anthropic-format message history (list of {role, content}).
-        tools: anthropic tool schemas (``app.tools.TOOLS``).
+        system: system prompt (tone rules). Caller passes ``SYSTEM_PROMPT``.
+        messages: Anthropic-shape history (list of {role, content}).
+        tools: Anthropic-shape tool schemas (``app.tools.TOOLS``).
 
     Returns:
-        ``(tool_calls, assistant_text)`` — structured ``tool_use`` blocks parsed
-        into ``ToolCall`` objects, plus the concatenated assistant prose.
-
-    NOTE: we deliberately do NOT pass ``temperature`` and never prefill an
-    assistant message. The model decides which tools to call; the orchestrator
-    acts only on ``tool_calls`` and uses ``assistant_text`` for display only.
+        ``(tool_calls, assistant_text)`` — tool calls parsed into ``ToolCall``
+        objects (with the provider call-id stashed under ``_tool_use_id`` so the
+        orchestrator can answer each with a matching tool_result), plus the
+        assistant prose (display only — never parsed for numbers).
     """
-    client = _client()
+    key = _key()
+    try:
+        import httpx  # lazy import so the package imports without the dep
+    except ImportError as exc:  # pragma: no cover - present in prod
+        raise LLMError("The 'httpx' package is not installed. Add it to requirements.txt.") from exc
 
-    kwargs: dict = {
+    payload: dict = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "system": system,
-        "messages": messages,
+        "temperature": TEMPERATURE,
+        "messages": _to_openai_messages(system, messages),
     }
-    if tools:
-        kwargs["tools"] = tools
-    # No temperature. No assistant prefill. (claude-opus-4-8 contract.)
+    oai_tools = _to_openai_tools(tools)
+    if oai_tools:
+        payload["tools"] = oai_tools
+        payload["tool_choice"] = "auto"
 
-    resp = client.messages.create(**kwargs)
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        # Optional OpenRouter attribution headers (harmless if ignored).
+        "HTTP-Referer": "https://localhost/tax1040",
+        "X-Title": "Agentic Tax-Filing Assistant",
+    }
 
+    try:
+        resp = httpx.post(
+            f"{BASE_URL}/chat/completions", headers=headers, json=payload, timeout=120.0
+        )
+    except httpx.HTTPError as exc:
+        raise LLMError(f"OpenRouter request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise LLMError(f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    try:
+        msg = data["choices"][0]["message"]
+    except (KeyError, IndexError) as exc:
+        raise LLMError(f"OpenRouter response missing choices: {str(data)[:300]}") from exc
+
+    assistant_text = (msg.get("content") or "").strip()
     tool_calls: list[ToolCall] = []
-    text_parts: list[str] = []
-    for block in resp.content:
-        btype = getattr(block, "type", None)
-        if btype == "tool_use":
-            tool_calls.append(
-                ToolCall(
-                    name=block.name,
-                    args=dict(block.input or {}),
-                    # Store the SDK's tool_use id so the orchestrator can return
-                    # a matching tool_result on the follow-up turn.
-                    result=None,
-                    ok=True,
-                )
-            )
-            # Stash the tool_use id on the args under a private key the
-            # orchestrator strips before dispatch (keeps ToolCall schema clean).
-            tool_calls[-1].args.setdefault("_tool_use_id", getattr(block, "id", ""))
-        elif btype == "text":
-            text_parts.append(block.text)
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        raw_args = fn.get("arguments") or "{}"
+        try:
+            args = json.loads(raw_args)
+        except (ValueError, json.JSONDecodeError):
+            args = {}
+        if not isinstance(args, dict):
+            args = {"value": args}
+        args["_tool_use_id"] = tc.get("id", "")
+        tool_calls.append(ToolCall(name=fn.get("name", ""), args=args, result=None, ok=True))
 
-    assistant_text = "".join(text_parts).strip()
     return tool_calls, assistant_text
 
 

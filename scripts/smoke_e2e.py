@@ -69,16 +69,19 @@ def main():
     import io
     f = PdfReader(io.BytesIO(body))
     txt = "".join((p.extract_text() or "") for p in f.pages)
-    for needle in ["40,000", "24,250", "2,675", "325"]:
+    # sample W-2 withholds 3,120 -> tax 2,675 -> refund 445
+    for needle in ["40,000", "24,250", "2,675", "3,120", "445"]:
         assert needle in txt, f"FAIL: expected '{needle}' not visible in PDF text"
-    print("  PDF shows wages 40,000 / taxable 24,250 / tax 2,675 / refund 325  OK")
+    print("  PDF shows wages 40,000 / taxable 24,250 / tax 2,675 / withheld 3,120 / refund 445  OK")
 
     print("== observation trace ==")
     raw, status, _ = get(f"/trace/{sid}")
-    tr = json.loads(raw)
+    raw_s = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    tr = json.loads(raw_s)
     n = len(tr.get("events", []))
     assert n >= 2, "FAIL: trace empty"
-    assert "123-45-6789" not in raw, "FAIL: full SSN leaked in trace"
+    assert "123-45-6789" not in raw_s, "FAIL: full SSN leaked in trace"
+    assert "XXX-XX-6789" in raw_s, "FAIL: redacted SSN not found in trace"
     print(f"  {n} events; full SSN NOT present in trace  OK")
 
     print("== guardrail (off-topic) ==")
