@@ -2,11 +2,20 @@
 
 Key design choices and why, for the open items the brief leaves to us. The thesis behind all of them: **a deterministic Python tax core the LLM is structurally forbidden from doing math in** — the model only talks and extracts; code computes the return and fills the real IRS PDF. That makes the four pillars enforced and visible rather than "it's in the prompt."
 
+## The four pillars (the harness — judged first)
+
+Every pillar is enforced in **code**, not merely requested in the prompt:
+
+- **1 · Chat loop** — an explicit finite state machine (not the model) owns the flow and the hard 5-question budget; the LLM only supplies warm wording. The happy path uses 2 of 5 questions. (See #6.)
+- **2 · Tools** — a single `dispatch()` is the ONLY code that can mutate a slot, compute the return, or fill the PDF. The model acts solely through typed, schema-validated tool calls; any number it writes in prose is ignored. (See #2–#5.)
+- **3 · Guardrails** — a pre-LLM scope gate refuses advice/off-topic input without consuming a question, Pydantic validates every W-2 and slot value, a hard counter caps questions at 5, the W-2 is validated with graceful recovery (an unreadable Box 1 is asked for, not silently zeroed), and download stays locked until `compute_1040` succeeds. (See #7.)
+- **4 · Observation** — every turn records an event — tools called (✓/✕), guardrail hits, the decision + its reason, the live question budget, latency, and a SHA-256 audit hash — surfaced in a PII-redacted trace panel **in the UI**, not just the logs.
+
 **Scope note:** core = a single filer with one W-2, fully correct at ~$40k (childless EITC and CTC are both $0 there, so no credit logic is needed). All five filing statuses compute correctly (the standard deduction and brackets differ by status), but for MFJ/MFS we deliberately do **not** collect a spouse's name/SSN — that is left for the filer to add on the form, to protect the 5-question budget. Dependents / CTC / EITC / HoH / QSS credit logic is implemented as a guarded, documented stretch.
 
 1. **Language / framework — Python + FastAPI, single process.** One process serves both the API and its own minimal server-rendered HTML, so there is no build step and no CORS (same-origin). Front-end polish is explicitly not judged, so we spent the complexity budget on the harness and the tax core instead.
 
-2. **LLM provider — OpenRouter (`openai/gpt-4o`) behind a provider-agnostic `llm_turn()`.** The original Anthropic `claude-opus-4-8` key was revoked (401), so we pivoted; the brief allows any provider. We call OpenRouter's OpenAI-compatible `/chat/completions` over plain HTTP, with the messages/tools translated from the original Anthropic shape, so the orchestrator is unchanged and the provider stays swappable. The key is read from `OPENROUTER_API_KEY` at call time (a Cloud Run secret in prod), so the package imports cleanly with no key set.
+2. **LLM provider — OpenRouter (`openai/gpt-4o`) behind a provider-agnostic `llm_turn()`.** The brief allows any provider; we call OpenRouter's OpenAI-compatible `/chat/completions` over plain HTTP, with messages/tools translated behind one function so the orchestrator is provider-agnostic and the model stays swappable. The key is read from `OPENROUTER_API_KEY` at call time (a Cloud Run secret in prod), so the package imports cleanly with no key set.
 
 3. **Deterministic tax core — `compute_1040`, pure Python, no LLM.** The LLM is structurally barred from arithmetic; all math is plain code. TY2025 post-OBBBA constants (Single std deduction $15,750, CTC $2,200) are reused verbatim from a tested source rather than retyped. Line 16 uses the IRS Tax Table midpoint rule (`(taxable//50)*50 + 25`), not the raw bracket formula — the formula is off by $3 against the official table at $40k.
 
