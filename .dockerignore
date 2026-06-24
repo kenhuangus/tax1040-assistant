@@ -11,5 +11,6 @@ notes
 tests
 docs
 scripts/_grok_*
-assets/irs/_probe
+assets/irs/_probe/*.pdf
+assets/irs/_probe/*.png
 out
