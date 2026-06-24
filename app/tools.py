@@ -57,11 +57,19 @@ TOOLS: list[dict] = [
     {
         "name": "set_slot",
         "description": (
-            "Save ONE validated answer to the return. Use name='filing_status' "
-            "with value one of single|mfj|mfs|hoh|qss. Use name='dependents' "
-            "with value being a JSON list of dependents (or an empty list / 0 / "
-            "'none' if the user has none). Use name='confirm' with value true "
-            "when the user approves the summary so the return can be computed."
+            "Save ONE validated answer to the return.\n"
+            "- name='filing_status': value is one of single|mfj|mfs|hoh|qss.\n"
+            "- name='dependents': value is a JSON list of dependent OBJECTS (or an "
+            "empty list / 0 / 'none' if the user has none). Each dependent object "
+            "MUST be: {\"name\": str, \"ssn\": str, \"relationship\": str, "
+            "\"is_under_17\": bool, \"has_ssn\": bool}. Set is_under_17=true when "
+            "the dependent was UNDER AGE 17 at the end of 2025 (this is what makes "
+            "them a qualifying child for the $2,200 Child Tax Credit instead of the "
+            "$500 Credit for Other Dependents) and false otherwise; set has_ssn=true "
+            "if the dependent has a Social Security Number. Always fill is_under_17 "
+            "explicitly from the user's facts (e.g. their age) — do not omit it.\n"
+            "- name='confirm': value true when the user approves the summary so the "
+            "return can be computed."
         ),
         "input_schema": {
             "type": "object",
@@ -71,7 +79,35 @@ TOOLS: list[dict] = [
                     "enum": ["filing_status", "dependents", "confirm"],
                 },
                 "value": {
-                    "description": "The value for the slot (string, number, bool, or list).",
+                    "description": (
+                        "The value for the slot. For filing_status: a status string. "
+                        "For confirm: true/false. For dependents: a JSON array of "
+                        "objects, each {name, ssn, relationship, is_under_17 (boolean: "
+                        "true if the dependent was under age 17 at the end of 2025), "
+                        "has_ssn (boolean)} — or an empty list / 0 / 'none' for no "
+                        "dependents."
+                    ),
+                    "type": ["array", "string", "number", "boolean", "null"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Dependent's full name."},
+                            "ssn": {"type": "string", "description": "Dependent's SSN (verbatim)."},
+                            "relationship": {
+                                "type": "string",
+                                "description": "Relationship to the filer (e.g. son, daughter, parent).",
+                            },
+                            "is_under_17": {
+                                "type": "boolean",
+                                "description": "True if the dependent was under age 17 at the end of 2025 (qualifying child for the Child Tax Credit).",
+                            },
+                            "has_ssn": {
+                                "type": "boolean",
+                                "description": "True if the dependent has a Social Security Number.",
+                            },
+                        },
+                        "required": ["name", "is_under_17"],
+                    },
                 },
             },
             "required": ["name", "value"],
@@ -120,10 +156,130 @@ TOOL_NAMES = {t["name"] for t in TOOLS}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# Valid fields on the Dependent model. Anything else a model emits (age,
+# qualifying_child, etc.) is interpreted into these and then dropped.
+_DEPENDENT_FIELDS = ("name", "ssn", "relationship", "is_under_17", "has_ssn")
+
+# Phrasings a model commonly emits in an `age` field to mean "younger than 17".
+_UNDER_17_PHRASES = {
+    "under 17", "under17", "under-17", "<17", "< 17", "under age 17",
+    "younger than 17", "minor", "child",
+}
+
+
+def _truthy(value: Any) -> bool:
+    """Loose truth test for model-emitted booleans (handles "true"/"yes"/1)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "y", "1", "t")
+    return bool(value)
+
+
+def _age_under_17(value: Any) -> bool | None:
+    """Interpret an age-ish value. Returns True/False if decidable, else None.
+
+    Accepts ints (16 -> True, 18 -> False), numeric strings ("16"), and free
+    text like "under 17" / "under17" / "16 years old".
+    """
+    if isinstance(value, bool):  # guard: bool is a subclass of int
+        return None
+    if isinstance(value, (int, float)):
+        return value < 17
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if not s:
+            return None
+        if s in _UNDER_17_PHRASES or "under 17" in s or "under17" in s:
+            return True
+        # Pull the first integer out of strings like "16", "16 years", "age 9".
+        import re
+
+        m = re.search(r"\d+", s)
+        if m:
+            return int(m.group()) < 17
+    return None
+
+
+def _derive_is_under_17(item: dict) -> bool:
+    """Derive ``is_under_17`` from the many shapes a model emits.
+
+    Honors an explicit ``is_under_17`` first; otherwise infers from age /
+    under_17 / is_child / qualifying_child / a child-ish relationship paired
+    with an age<17 signal. Defaults False (-> $500 ODC) when nothing indicates a
+    qualifying child.
+    """
+    if "is_under_17" in item and item["is_under_17"] is not None:
+        return _truthy(item["is_under_17"])
+
+    # Direct age signals.
+    for key in ("age", "age_years", "age_at_year_end"):
+        if key in item and item[key] is not None:
+            decided = _age_under_17(item[key])
+            if decided is not None:
+                return decided
+
+    # Explicit under-17 / child flags.
+    for key in ("under_17", "under17", "is_child", "qualifying_child", "qualifying_child_under_17"):
+        if key in item and item[key] is not None:
+            return _truthy(item[key])
+
+    # A child-ish relationship plus any age<17 signal also qualifies.
+    rel = str(item.get("relationship", "")).strip().lower()
+    if any(word in rel for word in ("child", "son", "daughter")):
+        for key in ("age", "age_years", "age_at_year_end"):
+            if key in item and item[key] is not None:
+                decided = _age_under_17(item[key])
+                if decided:
+                    return True
+
+    return False
+
+
+def _build_dependent(item: dict) -> Dependent:
+    """Build a ``Dependent`` from a model-supplied dict, tolerant of extra keys.
+
+    Derives ``is_under_17`` (see :func:`_derive_is_under_17`) and ``has_ssn``
+    (True iff a non-empty ``ssn`` is present, unless explicitly overridden), and
+    passes ONLY valid ``Dependent`` fields through — unknown keys are dropped.
+    Raises ValueError on truly malformed input (e.g. no usable name).
+    """
+    ssn = item.get("ssn") or ""
+    if not isinstance(ssn, str):
+        ssn = str(ssn)
+    ssn = ssn.strip()
+
+    if "has_ssn" in item and item["has_ssn"] is not None:
+        has_ssn = _truthy(item["has_ssn"])
+    else:
+        has_ssn = bool(ssn)
+
+    fields = {
+        "name": item.get("name", ""),
+        "ssn": ssn,
+        "relationship": item.get("relationship", "") or "",
+        "is_under_17": _derive_is_under_17(item),
+        "has_ssn": has_ssn,
+    }
+    # Defensive: never pass keys the model coined (age, etc.) to the model.
+    fields = {k: v for k, v in fields.items() if k in _DEPENDENT_FIELDS}
+    try:
+        return Dependent(**fields)
+    except Exception as exc:  # pydantic ValidationError
+        raise ValueError(f"invalid dependent {item!r}: {exc}") from exc
+
+
 def _coerce_dependents(value: Any) -> list[Dependent]:
     """Coerce a model-supplied dependents value into a validated list.
 
     Accepts: empty / "none" / 0 -> []; a JSON-ish list of dicts -> [Dependent].
+    Each dict is interpreted robustly (``_build_dependent``) so the model's
+    real-world shapes ({"age": 16}, {"age": "under 17"}, {"qualifying_child":
+    true}, ...) correctly set ``is_under_17`` / ``has_ssn`` instead of silently
+    defaulting to a $500 Credit for Other Dependents.
+
     Raises ValueError on anything malformed (caught -> schema guardrail hit).
     """
     if value in (None, "", 0, "0", "none", "None", "no", "No", False, []):
@@ -144,10 +300,7 @@ def _coerce_dependents(value: Any) -> list[Dependent]:
         if isinstance(item, Dependent):
             deps.append(item)
         elif isinstance(item, dict):
-            try:
-                deps.append(Dependent(**item))
-            except Exception as exc:  # pydantic ValidationError
-                raise ValueError(f"invalid dependent {item!r}: {exc}") from exc
+            deps.append(_build_dependent(item))
         elif isinstance(item, str):
             deps.append(Dependent(name=item))
         else:
