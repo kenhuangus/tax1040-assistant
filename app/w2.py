@@ -47,9 +47,13 @@ _EXTRACT_TOOL = {
 _EXTRACT_SYSTEM = (
     "You extract fields from a U.S. W-2 wage statement. Return whole-dollar "
     "integers for the money boxes (round to the nearest dollar; strip $ and "
-    "commas). If the input is not a W-2 or is missing Box 1 or Box 2, call the "
-    "tool with your best effort but leave unknown numeric fields as 0. Always "
-    "call the emit_w2 tool; do not answer in prose."
+    "commas). CRITICAL: never fabricate or guess a value. If you genuinely "
+    "cannot read a box, OMIT that field entirely from the tool call — do NOT "
+    "emit 0 as a placeholder for an unreadable box (0 means a real, legible "
+    "zero, e.g. Box 2 federal tax withheld can legitimately be 0). Likewise "
+    "omit employee_name or ssn if you cannot read them rather than inventing "
+    "them. If the input is clearly not a W-2, still call the tool but omit the "
+    "fields you cannot find. Always call the emit_w2 tool; do not answer in prose."
 )
 
 
@@ -61,10 +65,53 @@ def _coerce_money(value: Any) -> int:
         raise ValueError("invalid money value")
     if isinstance(value, (int, float)):
         return int(round(value))
-    s = str(value).strip().replace("$", "").replace(",", "")
+    s = str(value).strip().replace("$", "").replace(",", "").replace(" ", "")
     if s == "":
         raise ValueError("empty money value")
     return int(round(float(s)))
+
+
+def _coerce_ssn(value: Any) -> str:
+    """Normalize an SSN-ish value to ``123-45-6789``.
+
+    Accepts ``"123-45-6789"``, ``"123456789"``, spaced variants, etc. Anything
+    without 9 digits is rejected so the caller can ask for a valid SSN.
+    """
+    if value is None:
+        raise ValueError("missing SSN")
+    digits = re.sub(r"\D", "", str(value))
+    if len(digits) != 9:
+        raise ValueError("SSN does not contain 9 digits")
+    return f"{digits[0:3]}-{digits[3:5]}-{digits[5:9]}"
+
+
+# Keys that signal the dict actually came from a W-2 (vs arbitrary JSON).
+_W2_SIGNAL_KEYS = (
+    "wages",
+    "fed_withholding",
+    "federalTaxWithheld",
+    "employee_name",
+    "name",
+    "ssn",
+    "employer",
+)
+
+
+def _looks_like_w2(d: dict) -> bool:
+    """True if the dict carries at least one recognizable W-2 field with a value.
+
+    Guards against arbitrary JSON (e.g. ``{"foo": "bar"}``) being treated as a
+    partial W-2 — that should surface the friendly "doesn't look like a W-2"
+    message rather than a field-specific one.
+    """
+    for k in _W2_SIGNAL_KEYS:
+        v = d.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        return True
+    return False
 
 
 def _build_w2(d: dict) -> W2:
@@ -73,21 +120,67 @@ def _build_w2(d: dict) -> W2:
     Raises ``ValueError`` on anything malformed so the guardrail layer logs a
     schema hit rather than letting bad facts into a slot.
     """
-    try:
-        wages = _coerce_money(d.get("wages"))
-        fed = _coerce_money(d.get("fed_withholding", d.get("federalTaxWithheld")))
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"W-2 money fields invalid: {exc}") from exc
+    # If essentially nothing recognizable came through, it isn't a W-2 at all.
+    if not _looks_like_w2(d):
+        raise ValueError(
+            "This doesn't look like a W-2 — I couldn't find wages, a name, or an "
+            "SSN in it. Could you paste your W-2 (or its Box 1 wages, Box 2 "
+            "federal tax withheld, your name, and SSN)?"
+        )
 
-    if wages < 0 or fed < 0:
-        raise ValueError("W-2 money fields must be non-negative whole dollars")
+    # --- Box 1 wages: missing/unreadable -> treat as MISSING, never $0 -----
+    raw_wages = d.get("wages")
+    if raw_wages is None or (isinstance(raw_wages, str) and raw_wages.strip() == ""):
+        raise ValueError(
+            "I couldn't read your wages (Box 1) — what was the amount in Box 1?"
+        )
+    try:
+        wages = _coerce_money(raw_wages)
+    except (ValueError, TypeError):
+        raise ValueError(
+            "I couldn't read your wages (Box 1) — what was the amount in Box 1?"
+        ) from None
+    if wages <= 0:
+        # A $0-wage W-2 means Box 1 was unreadable/missing for this tool.
+        raise ValueError(
+            "I couldn't read your wages (Box 1) — what was the amount in Box 1?"
+        )
+    if wages < 0:  # pragma: no cover - unreachable, kept explicit for non-neg rule
+        raise ValueError("Box 1 wages can't be negative — what was the amount in Box 1?")
+
+    # --- Box 2 federal tax withheld: 0 is LEGITIMATE; only reject if present
+    #     and unparseable. Absent -> default 0 (some W-2s omit it).
+    raw_fed = d.get("fed_withholding", d.get("federalTaxWithheld"))
+    if raw_fed is None or (isinstance(raw_fed, str) and raw_fed.strip() == ""):
+        fed = 0
+    else:
+        try:
+            fed = _coerce_money(raw_fed)
+        except (ValueError, TypeError):
+            raise ValueError(
+                "I couldn't read your federal tax withheld (Box 2) — what was the "
+                "amount in Box 2? (Enter 0 if nothing was withheld.)"
+            ) from None
+    if fed < 0:
+        raise ValueError(
+            "Box 2 federal tax withheld can't be negative — what was the amount in "
+            "Box 2? (Enter 0 if nothing was withheld.)"
+        )
 
     name = (d.get("employee_name") or d.get("name") or "").strip()
-    ssn = (d.get("ssn") or "").strip()
     if not name:
-        raise ValueError("W-2 is missing the employee name")
-    if not ssn:
-        raise ValueError("W-2 is missing the employee SSN")
+        raise ValueError(
+            "I couldn't find the employee name on this W-2 — what name is on it "
+            "(Box e)?"
+        )
+
+    try:
+        ssn = _coerce_ssn(d.get("ssn"))
+    except (ValueError, TypeError):
+        raise ValueError(
+            "I couldn't read a valid Social Security number (Box a) — what's the "
+            "9-digit SSN (e.g. 123-45-6789)?"
+        ) from None
 
     try:
         # Pydantic does the final schema enforcement (types, required fields).

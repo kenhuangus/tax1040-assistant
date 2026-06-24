@@ -361,7 +361,11 @@ def dispatch(tool_call: ToolCall, session) -> dict:
                     image_b64=args.get("image_b64"),
                 )
             except ValueError as exc:
-                return _fail("schema", f"W-2 rejected: {exc}", slot="w2")
+                # _build_w2 raises a complete, user-facing sentence naming the
+                # exact problem (missing Box 1 wages, unparseable Box 2, missing
+                # name/SSN, or "not a W-2"). Pass it through verbatim so the model
+                # can relay that specific question and the user can re-paste a fix.
+                return _fail("schema", str(exc), slot="w2")
             session.slots.w2 = w2
             slot_changes["w2"] = {
                 "employee_name": w2.employee_name,
