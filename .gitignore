@@ -22,3 +22,12 @@ Thumbs.db
 
 # Fusion worktrees
 .fusion/worktrees/
+.fusion
+.pi
+fusion.db
+fusion.db-wal
+fusion.db-shm
+
+# PDF probe binaries (keep JSON, drop heavy renders/test PDFs)
+assets/irs/_probe/*.pdf
+assets/irs/_probe/*.png
