@@ -1,0 +1,25 @@
+{
+  "name": "codegraph_callees",
+  "description": "Find all functions/methods that a specific symbol calls. Useful for understanding dependencies and code flow.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "symbol": {
+        "type": "string",
+        "description": "Name of the function, method, or class to find callees for"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Maximum number of callees to return (default: 20)",
+        "default": 20
+      },
+      "projectPath": {
+        "type": "string",
+        "description": "Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases."
+      }
+    },
+    "required": [
+      "symbol"
+    ]
+  }
+}

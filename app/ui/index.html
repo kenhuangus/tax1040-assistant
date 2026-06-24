@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tax-Filing Assistant — Form 1040 (2025)</title>
+<style>
+  :root { --bg:#0f1216; --panel:#161b22; --me:#1f6feb; --bot:#21262d; --txt:#e6edf3; --muted:#8b949e; --line:#30363d; --warn:#f85149; --ok:#3fb950; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  header .disc { color:var(--muted); font-size:12px; margin-top:2px; }
+  main { display:flex; gap:14px; max-width:1100px; margin:0 auto; padding:14px; align-items:flex-start; }
+  #chatwrap { flex:1 1 0; min-width:0; }
+  #log { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; height:60vh; overflow-y:auto; }
+  .msg { margin:8px 0; display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { padding:9px 12px; border-radius:12px; max-width:80%; white-space:pre-wrap; word-wrap:break-word; }
+  .user .bubble { background:var(--me); }
+  .bot .bubble { background:var(--bot); }
+  .sys { color:var(--muted); font-size:12px; text-align:center; margin:6px 0; }
+  .row { display:flex; gap:8px; margin-top:10px; }
+  textarea { flex:1; resize:vertical; min-height:46px; background:var(--panel); color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:9px; font:inherit; }
+  button { background:var(--me); color:#fff; border:0; border-radius:8px; padding:9px 14px; font:inherit; cursor:pointer; }
+  button.secondary { background:#30363d; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+  .badge { margin-left:auto; color:var(--muted); font-size:13px; }
+  #err { color:var(--warn); font-size:13px; min-height:18px; margin-top:6px; }
+  /* trace panel */
+  #tracewrap { flex:0 0 340px; }
+  #trace { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; max-height:74vh; overflow-y:auto; display:none; }
+  .ev { border:1px solid var(--line); border-radius:8px; padding:8px; margin-bottom:8px; font-size:12.5px; }
+  .ev h4 { margin:0 0 4px; font-size:12.5px; }
+  .ev .k { color:var(--muted); }
+  .ev .hit { color:var(--warn); }
+  .ev .tool { color:var(--ok); }
+  @media (max-width:820px){ main{flex-direction:column;} #tracewrap{flex:1 1 auto;width:100%;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tax-Filing Assistant — IRS Form 1040 (2025)</h1>
+  <div class="disc">Educational hackathon tool — not tax advice. Fake data only.</div>
+</header>
+<main>
+  <section id="chatwrap">
+    <div id="log" aria-live="polite"></div>
+    <div class="row">
+      <textarea id="input" placeholder="Type a message, or click “Load sample W-2” to begin…"></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="toolbar">
+      <button class="secondary" id="sample">Load sample W-2</button>
+      <button class="secondary" id="download" disabled>Download 1040</button>
+      <button class="secondary" id="toggleTrace">Show agent trace</button>
+      <span class="badge" id="budget">Questions: 0/5</span>
+    </div>
+    <div id="err"></div>
+  </section>
+  <aside id="tracewrap">
+    <div id="trace"></div>
+  </aside>
+</main>
+
+<script>
+const SAMPLE_W2 = `Here is my W-2:
+Employee: Jordan A Rivera   SSN: 123-45-6789
+Address: 742 Birchwood Ave, Columbus, OH 43215
+Employer: Northwind Logistics LLC  (EIN 31-1234567)
+Box 1 (wages): 40000
+Box 2 (federal income tax withheld): 3120
+Box 3 (SS wages): 40000   Box 4 (SS tax): 2480
+Box 5 (Medicare wages): 40000   Box 6 (Medicare tax): 580`;
+
+let sessionId = null;
+let canDownload = false;
+let traceVisible = false;
+
+const $ = id => document.getElementById(id);
+const log = $('log'), input = $('input'), errEl = $('err');
+
+function addMsg(role, text){
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
+  const b = document.createElement('div');
+  b.className = 'bubble'; b.textContent = text;
+  wrap.appendChild(b); log.appendChild(wrap); log.scrollTop = log.scrollHeight;
+}
+function addSys(text){
+  const d = document.createElement('div'); d.className='sys'; d.textContent=text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+
+async function send(){
+  const message = input.value.trim();
+  if (!message) return;
+  errEl.textContent = '';
+  addMsg('user', message);
+  input.value = '';
+  setBusy(true);
+  const thinking = document.createElement('div');
+  thinking.className='sys'; thinking.textContent='thinking…'; log.appendChild(thinking);
+  try {
+    const res = await fetch('/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ session_id: sessionId, message })
+    });
+    if (!res.ok) throw new Error('Server returned ' + res.status);
+    const data = await res.json();
+    sessionId = data.session_id || sessionId;
+    canDownload = !!data.can_download;
+    thinking.remove();
+    addMsg('bot', data.reply || '(no reply)');
+    $('budget').textContent = 'Questions: ' + (data.questions_asked ?? 0) + '/5';
+    $('download').disabled = !canDownload;
+    if (canDownload) addSys('Your 1040 is ready — click “Download 1040”.');
+    if (traceVisible) refreshTrace();
+  } catch (e) {
+    thinking.remove();
+    errEl.textContent = 'Error: ' + e.message;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function setBusy(b){ $('send').disabled = b; input.disabled = b; }
+
+async function refreshTrace(){
+  if (!sessionId) return;
+  const t = $('trace');
+  try {
+    const res = await fetch('/trace/' + sessionId);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    t.innerHTML = '<h3 style="margin:0 0 8px;font-size:13px;">Agent trace (Observation)</h3>';
+    if (!events.length){ t.innerHTML += '<div class="k" style="font-size:12px;color:#8b949e">No events yet.</div>'; return; }
+    for (const ev of events){
+      const d = ev.decision || {};
+      const tools = (ev.tool_calls||[]).map(c=>c.name).join(', ') || '—';
+      const hits = (ev.guardrail_hits||[]).map(h=>`${h.rule}${h.detail?': '+h.detail:''}`);
+      const card = document.createElement('div'); card.className='ev';
+      card.innerHTML =
+        `<h4>Turn ${ev.turn} · <span class="k">${d.next_action||''}</span></h4>` +
+        (d.reason?`<div class="k">${escapeHtml(d.reason)}</div>`:'') +
+        `<div><span class="k">tools:</span> <span class="tool">${escapeHtml(tools)}</span></div>` +
+        (Object.keys(ev.slot_changes||{}).length?`<div><span class="k">slots:</span> ${escapeHtml(JSON.stringify(ev.slot_changes))}</div>`:'') +
+        (hits.length?`<div class="hit">⚠ ${hits.map(escapeHtml).join('; ')}</div>`:'') +
+        (ev.latency_ms?`<div class="k">${ev.latency_ms} ms</div>`:'');
+      t.appendChild(card);
+    }
+  } catch(e){ /* trace is best-effort */ }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+$('send').addEventListener('click', send);
+input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+$('sample').addEventListener('click', () => { input.value = SAMPLE_W2; input.focus(); });
+$('download').addEventListener('click', () => { if (sessionId && canDownload) window.location = '/download/' + sessionId; });
+$('toggleTrace').addEventListener('click', () => {
+  traceVisible = !traceVisible;
+  $('trace').style.display = traceVisible ? 'block' : 'none';
+  $('toggleTrace').textContent = traceVisible ? 'Hide agent trace' : 'Show agent trace';
+  if (traceVisible) refreshTrace();
+});
+
+addMsg('bot', "Hi! I'm here to help you fill out your 2025 Form 1040. To start, paste your W-2 — or just click “Load sample W-2” below and we'll walk through it together.");
+</script>
+</body>
+</html>

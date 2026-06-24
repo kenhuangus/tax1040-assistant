@@ -1,0 +1,30 @@
+{
+  "name": "codegraph_context",
+  "description": "PRIMARY TOOL — call this FIRST for any \"how does X work\", architecture, feature, or bug-context question. Composes search + node + callers + callees and returns entry points, related symbols, and key code in ONE call — usually enough to answer with no further search/Read/Grep. Prefer this over chaining codegraph_search + codegraph_node, and over codegraph_explore. NOTE: provides CODE context, not product requirements; for new features still clarify UX/edge cases with the user.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "Description of the task, bug, or feature to build context for"
+      },
+      "maxNodes": {
+        "type": "number",
+        "description": "Maximum symbols to include (default: 20)",
+        "default": 20
+      },
+      "includeCode": {
+        "type": "boolean",
+        "description": "Include code snippets for key symbols (default: true)",
+        "default": true
+      },
+      "projectPath": {
+        "type": "string",
+        "description": "Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases."
+      }
+    },
+    "required": [
+      "task"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "employee_name": "Jordan A Rivera",
+  "ssn": "123-45-6789",
+  "address": "742 Birchwood Ave",
+  "city": "Columbus",
+  "state": "OH",
+  "zip": "43215",
+  "employer": "Northwind Logistics LLC",
+  "employer_ein": "31-1234567",
+  "control_number": "00042-NWL",
+  "wages": 40000,
+  "fed_withholding": 3120,
+  "box_3_ss_wages": 40000,
+  "box_4_ss_tax": 2480,
+  "box_5_medicare_wages": 40000,
+  "box_6_medicare_tax": 580,
+  "state_wages": 40000,
+  "state_income_tax": 1180
+}

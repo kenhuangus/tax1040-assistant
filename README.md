@@ -1,20 +1,43 @@
-# Hackathon
+# Agentic Tax-Filing Assistant — IRS Form 1040 (TY2025)
 
-Workspace for the hackathon on **2026-06-24**.
+A web chat where a person with a single ~$40k W-2 has a short, warm conversation
+(≤ 5 questions) and downloads a correctly filled **2025 IRS Form 1040**. Built on
+a harness that demonstrates four pillars, with a **deterministic tax core the LLM
+is structurally forbidden from doing math in**.
 
-## Structure
+> Educational hackathon project — **not tax advice**, fake data only, no e-filing.
 
-- `src/` — application / prototype code
-- `scripts/` — setup, build, and helper scripts
-- `docs/` — design docs, architecture, submission writeup
-- `notes/` — scratch notes, ideas, planning
+## The four pillars
+- **Chat loop** — server-held typed session state advanced by an explicit state machine each turn (`app/orchestrator.py`, `app/session.py`).
+- **Tools** — the agent acts only through typed tools; a single `dispatch()` is the one path that mutates state / fills the return (`app/tools.py`).
+- **Guardrails** — code-enforced scope refusal, Pydantic schema validation, and a hard 5-question budget; download locks until compute succeeds (`app/guardrails.py`, `app/statemachine.py`).
+- **Observation** — every turn records a structured event (tool calls, slot changes, guardrail hits, decision + reason); visible via `GET /trace/{id}` and the UI trace panel (`app/trace.py`).
 
-## Getting started
+## Live URL
+**TBD — Google Cloud Run** (see `docs/architecture.md` §6 to deploy).
 
-1. Drop the idea / problem statement in `notes/idea.md`.
-2. Capture the build plan in `docs/plan.md`.
-3. Track tasks with Fusion (`fn task list` / `fn dashboard`) from this directory.
+## Run locally (one command)
+Set your key first: `export ANTHROPIC_API_KEY=...` (Windows: `$env:ANTHROPIC_API_KEY=...`).
 
-## Day-of checklist
+**Docker:**
+```
+docker build -t tax1040 .
+docker run --rm -p 8080:8080 -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY tax1040
+```
+**No Docker:**
+```
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+Then open http://localhost:8080 and click **Load sample W-2** to try it.
 
-See `notes/checklist.md`.
+## Tests
+```
+pytest -q
+```
+
+## Docs
+- `docs/prd.md` — requirements & the four pillars as acceptance criteria
+- `docs/architecture.md` — components, tax compute spec, 1040 field map, deploy runbook
+- `docs/contracts.md` — frozen module interfaces
+- `DECISIONS.md` — key design choices and why

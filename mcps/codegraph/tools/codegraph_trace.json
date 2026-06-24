@@ -1,0 +1,25 @@
+{
+  "name": "codegraph_trace",
+  "description": "Trace the CALL PATH between two symbols — \"how does <from> reach/become <to>?\" Returns the chain of functions from one to the other (each hop with file:line and its body inlined, plus the outgoing calls of the destination itself) in ONE call. This is something grep/Read structurally cannot do: there is no text pattern for \"the path from A to B\". Ideal for flow questions — how an update triggers a render, how a request reaches a handler, how a QuerySet becomes SQL. If no static path exists the chain likely breaks at dynamic dispatch (callbacks/descriptors/metaclasses); the tool says where and points you to codegraph_node to bridge it.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "from": {
+        "type": "string",
+        "description": "Symbol the flow starts at (e.g., \"QuerySet\", \"handleRequest\", \"mutateElement\")"
+      },
+      "to": {
+        "type": "string",
+        "description": "Symbol the flow should reach (e.g., \"execute_sql\", \"render\", \"setState\")"
+      },
+      "projectPath": {
+        "type": "string",
+        "description": "Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases."
+      }
+    },
+    "required": [
+      "from",
+      "to"
+    ]
+  }
+}
