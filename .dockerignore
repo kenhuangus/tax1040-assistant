@@ -14,3 +14,4 @@ scripts/_grok_*
 assets/irs/_probe/*.pdf
 assets/irs/_probe/*.png
 out
+demo/
