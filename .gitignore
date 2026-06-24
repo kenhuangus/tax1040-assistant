@@ -11,6 +11,7 @@ build/
 
 # Env / secrets
 .env
+.env.*
 .env.local
 *.key
 
@@ -36,3 +37,9 @@ assets/irs/_probe/*.png
 out/
 scripts/_grok_*.txt
 scripts/_llm_probe.py
+
+# Stray MCP tool definitions (not part of this project)
+mcps/
+
+# Fusion (catch-all)
+.fusion/
